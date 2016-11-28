@@ -1,0 +1,160 @@
+---
+title: "Classification Project"
+author: "David Graber"
+date: "November 26, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Abstract
+This project's objective is the correct classificatino of barbell lift exercises into categories according to sensor data gathered by wearable accelerometer-equipped devices on the belt, forearm, arm, and dumbell.  The exercises were performed in five different ways, with the first ("A") being the correct form, and the other ways representing common mistakes.
+
+* (Class A): exactly according to the specification, 
+* (Class B): throwing the elbows to the front, 
+* (Class C): lifting the dumbbell only halfway, 
+* (Class D): lowering the dumbbell only halfway  
+* (Class E): throwing the hips to the front
+
+Data download and more info: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har)
+
+To accomplish this classification I trained a Random Forest model using R's "caret" package.  The resulting model has an estimated out-of-sample accuracy of over 99%.
+
+## Procedure
+Initial setup: libraries
+```{r, result = "hide", message= FALSE, warning= FALSE}
+library(AppliedPredictiveModeling)
+library(caret)
+library(gbm)
+library(parallel)
+library(doParallel)
+```
+Data import
+```{r, result = "hide", message= FALSE, warning= FALSE}
+training1 <- read.csv("pml-training.csv")
+testing1 <- read.csv("pml-testing.csv")
+training1$classe <- as.factor(training1$classe)
+```
+
+The training dataset consists of 19622 observations of 160 variables. An initial examination of the dataset reveals several columns of variables that are administrative, indicating times, users, and other information not related to the sensor inputs.  I created subsets of the datasets with these columns removed.  Many of the entries also contain NA values.  Because the model training routines respond differently to NAs, and some will not work at all, I replaced all NA values with 0.  There are also several columns that were entered as factors, sometimes with hundreds of levels; these factor columns were dropped as well.
+
+Here I subset the data, removing "X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", and "num_window".
+Also replacing all "NA" with "0".
+```{r}
+drops <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window")
+training <- training1[, !(names(training1) %in% drops) ]
+training[is.na(training)] <- 0
+trainvars <- training[, sapply(training, is.numeric)]
+traincor <- trainvars
+
+testing <- testing1[, !(names(testing1) %in% drops) ]
+testing[is.na(testing)] <- 0
+```
+
+
+### Model Training
+
+Because Random Forest ("rf") models are computationally intensive, I made use of the "doParallel" library to run the training on multiple CPU cores.  Using the trainControl parameter, I instructed the train method to perform 10-fold cross validation.
+
+```{r, cache = TRUE, result = "hide", message= FALSE, warning= FALSE}
+trainvars$classe <- training$classe
+train_control<- trainControl(method="cv", number=10, savePredictions = TRUE, allowParallel = TRUE)
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+modelRF<- train(classe ~ ., data=trainvars, trControl=train_control, method="rf")
+stopCluster(cl)
+```
+
+### Variable Importance and Estimated Accuracy
+```{r, message= FALSE, warning= FALSE}
+# estimate variable importance
+importance <- varImp(modelRF, scale=TRUE)
+importance
+# plot importance
+plot(importance)
+```
+
+Examining the variables with the highest importance scores provides some intuition about how the algorithm classifies the barbell lifts.  Roll, Yaw, and Pitch of the belt sensor are all in the top 4 of the importance list, which makes sense for detecting incorrect hip movements (Class E), and arm movements that would affect balance (requiring hip movement to compensate).  Forearm pitch, the 2nd most importance variable, makes perfect sense as a signal of incorrect lifting (classes C and D).
+
+```{r}
+# check accuracy of K-fold validations
+modelRF$resample
+mean(modelRF$resample$Accuracy)
+```
+
+The model training employed 10-fold cross validation, and the resample statistics provide an estimate of out-of-sample accuracy. The mean accuracy across the 10 validations was: `r mean(modelRF$resample$Accuracy)`.
+
+### Testing set predictions:
+```{r}
+qRF <- predict(modelRF, testing)
+names(qRF) <- 1:20
+qRF
+```
+
+
+## Appendix: Correlated Variables
+
+Find highly correlated variables:
+```{r}
+correlationMatrix <- cor(x = traincor, use = "pairwise.complete.obs")
+# find attributes that are highly corrected
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.5)
+# summarize the correlation matrix
+levelplot(correlationMatrix)
+```
+
+According to the correlation matrix, there are `r length(highlyCorrelated)` highly correlated (>0.5) variables in the dataset.  Eliminating these variables could speed up the model training process.
+
+
+## Appendix: Rejected Models
+
+#### LDA
+Linear Discriminant Analysis (LDA) models are computationally much faster than Random Forest models, but here I demonstrate that they are much less accurate.
+
+```{r, cache= TRUE, result = "hide", message= FALSE, warning= FALSE}
+cl <- makeCluster(4)
+registerDoParallel(cl)
+train_control <- trainControl(method="cv", number=10, savePredictions = TRUE, allowParallel = TRUE)
+modelLDA <- train(classe ~ ., data=trainvars, trControl=train_control, method="lda")
+stopCluster(cl)
+
+modelLDA$resample
+```
+
+The mean accuracy during validation of `r mean(modelLDA$resample$Accuracy)` is significantly lower than the accuracy of the RF model, and would not be effective at passing the quiz in this project!
+
+#### GBM
+Generalized Boosted Regression Models (GBM) are more computationally demanding than LDA models, and more accurate in this case, but not as accurate as the RF model.
+
+```{r, cache= TRUE, result = "hide", message= FALSE, warning= FALSE}
+cl <- makeCluster(6)
+registerDoParallel(cl)
+train_control <- trainControl(method="cv", number=10, savePredictions = TRUE, allowParallel = TRUE)
+modelGBM <- train(classe ~ ., data=trainvars, trControl=train_control, method="gbm")
+stopCluster(cl)
+
+modelGBM$resample
+```
+
+#### Model Comparisons
+The mean accuracies of the models are as follows:
+
+* RF: `r getTrainPerf(modelRF)`
+* GBM: `r getTrainPerf(modelGBM)`
+* LDA: `r getTrainPerf(modelLDA)`
+
+
+Variation in Quiz Predictions:
+```{r, cache= TRUE, include= FALSE}
+qLDA <- predict(modelLDA, testing)
+names(qLDA) <- 1:20
+qGBM <- predict(modelGBM, testing)
+names(qGBM) <- 1:20
+```
+
+* RF model: `r qRF`
+* GBM model: `r qGBM`
+* LDA model: `r qLDA`

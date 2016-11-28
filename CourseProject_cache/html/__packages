@@ -1,0 +1,13 @@
+base
+AppliedPredictiveModeling
+lattice
+ggplot2
+caret
+survival
+gbm
+foreach
+iterators
+doParallel
+randomForest
+MASS
+plyr
